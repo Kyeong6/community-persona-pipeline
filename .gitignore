@@ -187,3 +187,23 @@ poetry.toml
 pyrightconfig.json
 
 # End of https://www.toptal.com/developers/gitignore/api/python,dotenv,jupyternotebooks
+
+# Playwright 관련
+/playwright-report/
+/test-results/
+/playwright/.cache/
+
+# 환경변수 (이미 위에 .env가 있지만 명시적으로 추가)
+.env.local
+.env.development
+.env.production
+
+# 크롤링 결과 파일
+/data/
+/results/
+*.json
+*.csv
+
+# 로그 파일
+*.log
+logs/

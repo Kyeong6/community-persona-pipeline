@@ -1,5 +1,6 @@
 import asyncio
 import json
+import sys
 from mcp.server import Server
 from mcp.types import Tool, TextContent
 from src.crawlers.mamibebe_crawler import MamibebeCrawler
@@ -116,7 +117,18 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 async def main():
     """MCP 서버 실행"""
     print("커뮤니티 크롤링 MCP 서버를 시작합니다...")
-    await server.run()
+    from mcp.server.stdio import stdio_server
+    
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            server.create_initialization_options()
+        )
+
+def run_server():
+    """Poetry 스크립트용 진입점"""
+    asyncio.run(main())
 
 if __name__ == "__main__":
     asyncio.run(main())

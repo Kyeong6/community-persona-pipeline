@@ -38,6 +38,23 @@ class BaseCrawler(ABC):
     
     async def login_naver(self) -> Dict[str, str]:
         """네이버 로그인 후 쿠키 반환"""
+        # NAVER_COOKIE가 제공되면 로그인 과정을 우회한다.
+        # 형식: "NAME=VALUE; NAME2=VALUE2"
+        cookie_str = os.getenv('NAVER_COOKIE')
+        if cookie_str:
+            print("🫛🔐 NAVER_COOKIE 사용하여 로그인 우회 중...")
+            cookie_dict: Dict[str, str] = {}
+            for part in cookie_str.split(';'):
+                part = part.strip()
+                if not part or '=' not in part:
+                    continue
+                name, value = part.split('=', 1)
+                cookie_dict[name.strip()] = value.strip()
+            if not cookie_dict:
+                raise Exception("🫛🔐 NAVER_COOKIE 파싱 실패: 값이 비어있음")
+            self.naver_cookies = cookie_dict
+            return cookie_dict
+
         naver_id = os.getenv('NAVER_ID')
         naver_password = os.getenv('NAVER_PASSWORD')
         
@@ -100,7 +117,14 @@ class BaseCrawler(ABC):
     async def get_club_id(self, cafe_url: str) -> int:
         """카페 URL에서 club_id 추출"""
         print(f"🫛 카페 정보 가져오는 중: {cafe_url}")
-        
+        # 1차: URL 경로에서 직접 파싱 시도 (예: https://cafe.naver.com/f-e/cafes/29434212/popular)
+        direct = re.search(r"/cafes/(\d+)", cafe_url)
+        if direct:
+            club_id = int(direct.group(1))
+            print(f"🫛 Club ID(직접 파싱): {club_id}")
+            return club_id
+
+        # 2차: 응답 HTML에서 g_sClubId 변수 파싱
         async with httpx.AsyncClient(cookies=self.naver_cookies) as client:
             response = await client.get(cafe_url)
             response.raise_for_status()

@@ -1,91 +1,605 @@
 from src.crawlers.base_crawler import BaseCrawler
 from src.models.post import Post
-from typing import List
+from typing import List, Dict, Optional
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
+
 
 class PpomppuCrawler(BaseCrawler):
     def __init__(self):
         super().__init__()
-        self.url = "https://www.ppomppu.co.kr/zboard/zboard.php?id=ppomppu&hotlist_flag=999"
-        self.community = "뽐뿌"
+        self.popular_url = "https://www.ppomppu.co.kr/zboard/zboard.php?id=ppomppu&hotlist_flag=999"
+        self.channel = "ppomppu"
     
-    async def crawl(self, max_posts: int = 20) -> List[Post]:
+    async def crawl(self, max_posts: int = None) -> List[Post]:
+        """뽐뿌 인기글 크롤링 (오늘 기준 일주일 전까지)"""
         posts = []
         
         try:
-            await self.page.goto(self.url)
-            await self.page.wait_for_load_state('networkidle')
+            # 1. 인기글 페이지 접속 (로그인 불필요)
+            print(f"🫛 인기글 페이지 접속: {self.popular_url}")
             
-            # 게시글 목록 로드 대기
-            await self.page.wait_for_selector('.list_table', timeout=10000)
-            
-            # 게시글 행들 추출
-            post_rows = await self.page.query_selector_all('.list_table tr')
-            
-            for i, row in enumerate(post_rows[1:max_posts+1]):  # 헤더 제외
+            # 재시도 로직
+            max_retries = 3
+            for retry in range(max_retries):
                 try:
-                    # 제목과 링크 추출
-                    title_element = await row.query_selector('td.title a')
-                    if not title_element:
-                        continue
+                    # 페이지 접속
+                    response = await self.page.goto(
+                        self.popular_url, 
+                        wait_until="load",
+                        timeout=30000
+                    )
+                    if response:
+                        print(f"🫛 페이지 응답 상태: {response.status}")
+                        if response.status != 200:
+                            raise Exception(f"HTTP 상태 코드 오류: {response.status}")
                     
-                    title = await title_element.inner_text()
-                    href = await title_element.get_attribute('href')
+                    # 페이지 로딩 대기 (동적 콘텐츠 고려)
+                    await self.page.wait_for_timeout(3000)
                     
-                    if href and title:
-                        # 조회수, 댓글수 추출 (목록에서)
-                        views_element = await row.query_selector('td:nth-child(4)')
-                        comments_element = await row.query_selector('td:nth-child(5)')
-                        
-                        views = 0
-                        comments = 0
-                        
-                        if views_element:
-                            views_text = await views_element.inner_text()
-                            views = int(re.findall(r'\d+', views_text)[0]) if re.findall(r'\d+', views_text) else 0
-                        
-                        if comments_element:
-                            comments_text = await comments_element.inner_text()
-                            comments = int(re.findall(r'\d+', comments_text)[0]) if re.findall(r'\d+', comments_text) else 0
-                        
-                        # 게시글 상세 페이지로 이동하여 추천수 추출
-                        await self.page.goto(f"https://www.ppomppu.co.kr/zboard/{href}")
-                        await self.page.wait_for_load_state('networkidle')
-                        
-                        likes = await self._extract_likes()
-                        
-                        post = Post(
-                            title=title.strip(),
-                            url=f"https://www.ppomppu.co.kr/zboard/{href}",
-                            views=views,
-                            comments=comments,
-                            likes=likes,
-                            community=self.community,
-                            timestamp=datetime.now()
-                        )
+                    # 페이지 내용 확인
+                    page_title = await self.page.title()
+                    print(f"🫛 페이지 제목: {page_title[:50]}...")
+                    
+                    # 실제 HTML 구조 확인
+                    page_content = await self.page.content()
+                    print(f"🫛 페이지 길이: {len(page_content)} bytes")
+                    
+                    # 다양한 선택자로 테이블 찾기 시도
+                    selectors_to_try = [
+                        '.list_table',
+                        'table.list_table',
+                        '.board_table',
+                        'table.board_table',
+                        'table',
+                        '[class*="list"]',
+                        '[class*="table"]',
+                        '[id*="list"]'
+                    ]
+                    
+                    table_found = False
+                    for selector in selectors_to_try:
+                        try:
+                            element = await self.page.query_selector(selector)
+                            if element:
+                                print(f"🫛 테이블 발견: {selector}")
+                                # 게시글 행 확인
+                                row_count = await self.page.evaluate(f"document.querySelectorAll('{selector} tr').length")
+                                print(f"🫛 발견된 게시글 행 수: {row_count}")
+                                if row_count > 0:
+                                    table_found = True
+                                    break
+                        except:
+                            continue
+                    
+                    if not table_found:
+                        # 페이지 HTML 일부 출력 (디버깅)
+                        body_text = await self.page.evaluate("document.body.innerText")
+                        print(f"🫛 페이지 본문 일부: {body_text[:200]}...")
+                        raise Exception(f"게시글 테이블을 찾을 수 없습니다. 페이지 구조 확인 필요.")
+                    
+                    break
+                except Exception as e:
+                    if retry < max_retries - 1:
+                        print(f"🫛 페이지 로드 실패, 재시도 중... ({retry + 1}/{max_retries}): {e}")
+                        await self.page.wait_for_timeout(5000)  # 재시도 전 대기 시간 증가
+                    else:
+                        print(f"🫛 페이지 로드 최종 실패: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        raise
+            
+            # 2. 게시글 목록 수집 (일주일 전까지 필터링, 번호 존재 여부 확인)
+            post_items = await self._get_posts_from_popular_page(max_posts)
+            print(f"🫛 수집된 게시글 목록: {len(post_items)}개")
+            
+            # 3. 각 게시글 상세 정보 수집
+            for i, item in enumerate(post_items):
+                try:
+                    post_url = item.get('url', '')
+                    comment_cnt = item.get('comment_cnt', 0)
+                    title = item.get('title', '')
+                    
+                    print(f"🫛 게시글 데이터 수집 시작: {post_url} [{i+1}/{len(post_items)}]")
+                    
+                    # 게시글 상세 페이지 접속 (정적 페이지)
+                    await self.page.goto(
+                        post_url, 
+                        wait_until="load",
+                        timeout=30000
+                    )
+                    await self.page.wait_for_timeout(1000)
+                    
+                    # 게시글 데이터 추출
+                    post = await self._extract_post_data(post_url, comment_cnt, title)
+                    if post:
                         posts.append(post)
                         
                         # 요청 간격 조절
                         await self.page.wait_for_timeout(1000)
                         
                 except Exception as e:
-                    print(f"게시글 {i+1} 처리 중 오류: {e}")
+                    print(f"🫛 게시글 {post_url} 처리 중 오류: {e}")
+                    import traceback
+                    traceback.print_exc()
                     continue
                     
         except Exception as e:
-            print(f"뽐뿌 크롤링 오류: {e}")
+            print(f"🫛 뽐뿌 크롤링 오류: {e}")
+            import traceback
+            traceback.print_exc()
         
+        print(f"🫛 총 {len(posts)}개 게시글 수집 완료")
         return posts
     
-    async def _extract_likes(self) -> int:
-        """추천수 추출"""
+    async def _get_posts_from_popular_page(self, max_posts: int = None) -> List[Dict]:
+        """인기글 페이지에서 게시글 정보를 수집 (오늘 기준 일주일 전까지, 번호 존재 여부 확인)"""
+        print(f"🫛 인기글 목록 수집 중...")
+        
+        # 날짜 필터: 오늘 기준 일주일 전
+        today = datetime.now()
+        week_ago = today - timedelta(days=7)
+        print(f"🫛 날짜 필터: {week_ago.strftime('%Y-%m-%d')} ~ {today.strftime('%Y-%m-%d')}")
+        
+        collected_items: List[Dict] = []
+        current_page = 1
+        max_pages = 200  # 충분히 큰 값 (일주일 전까지 모든 페이지를 탐색)
+        
+        while current_page <= max_pages:
+            # 현재 페이지에서 게시글 정보 추출
+            await self.page.wait_for_timeout(2000)
+            
+            items = await self.page.evaluate("""
+                (() => {
+                    const items = [];
+                    // 다양한 테이블 선택자 시도
+                    let rows = [];
+                    const selectors = [
+                        '.list_table tr',
+                        'table.list_table tr',
+                        '.board_table tr',
+                        'table.board_table tr',
+                        'table tr',
+                        '[class*="list"] tr',
+                        '[class*="table"] tr'
+                    ];
+                    
+                    for (const sel of selectors) {
+                        rows = Array.from(document.querySelectorAll(sel));
+                        if (rows.length > 0) {
+                            console.log('테이블 발견:', sel, '행 수:', rows.length);
+                            break;
+                        }
+                    }
+                    
+                    for (const row of rows) {
+                        // 번호 컬럼 찾기 (첫 번째 td)
+                        const noTd = row.querySelector('td:first-child');
+                        if (!noTd) continue;
+                        
+                        const noText = noTd.innerText.trim();
+                        // 번호가 존재하는지 확인 (공백, "-", "공지" 등 제외)
+                        if (!noText || noText === '-' || noText === '공지' || isNaN(parseInt(noText))) {
+                            continue;
+                        }
+                        
+                        // 제목 링크 찾기
+                        const titleLink = row.querySelector('td.title a, a[href*="view.php"]');
+                        if (!titleLink) continue;
+                        
+                        const href = titleLink.getAttribute('href');
+                        if (!href) continue;
+                        
+                        // URL 생성
+                        let fullUrl = href;
+                        if (href.startsWith('/')) {
+                            fullUrl = 'https://www.ppomppu.co.kr' + href;
+                        } else if (href.startsWith('view.php')) {
+                            fullUrl = 'https://www.ppomppu.co.kr/zboard/' + href;
+                        } else if (!href.startsWith('http')) {
+                            fullUrl = 'https://www.ppomppu.co.kr/zboard/' + href;
+                        }
+                        
+                        // 제목 추출
+                        const titleText = titleLink.innerText.trim() || titleLink.textContent.trim();
+                        
+                        // 댓글수 추출 (제목 마지막 부분 또는 span.baseList-c)
+                        let commentCount = 0;
+                        const commentSpan = row.querySelector('span.baseList-c');
+                        if (commentSpan) {
+                            const commentText = commentSpan.innerText.trim();
+                            const match = commentText.match(/(\\d+)/);
+                            if (match) {
+                                commentCount = parseInt(match[1]);
+                            }
+                        }
+                        
+                        // 제목에서도 댓글수 찾기 (제목 뒤 숫자 패턴)
+                        if (commentCount === 0) {
+                            // 제목 마지막 숫자 찾기 (예: "...7 [가전/전자]")
+                            const titleMatch = titleText.match(/(\\d+)\\s*\\[[^\\]]+\\]$/);
+                            if (titleMatch) {
+                                commentCount = parseInt(titleMatch[1]);
+                            }
+                        }
+                        
+                        // 날짜 추출 (일반적으로 날짜 컬럼)
+                        let dateText = '';
+                        const dateCells = row.querySelectorAll('td');
+                        for (const cell of dateCells) {
+                            const text = cell.innerText.trim();
+                            // 날짜 패턴 찾기 (YY/MM/DD 또는 HH:MM:SS)
+                            if (text.match(/\\d{2}\\/\\d{2}\\/\\d{2}/) || text.match(/\\d{2}:\\d{2}:\\d{2}/)) {
+                                dateText = text;
+                                break;
+                            }
+                        }
+                        
+                        // 카테고리 추출 (제목에서 [카테고리] 패턴)
+                        let category = '';
+                        const categoryMatch = titleText.match(/^\\[([^\\]]+)\\]/);
+                        if (categoryMatch) {
+                            category = categoryMatch[1];
+                        }
+                        
+                        items.push({
+                            url: fullUrl,
+                            title: titleText,
+                            dateText: dateText,
+                            comment_cnt: commentCount,
+                            category: category,
+                            no: noText
+                        });
+                    }
+                    
+                    return items;
+                })()
+            """)
+            
+            print(f"🫛 [페이지 {current_page}] 화면에서 발견된 게시글 수: {len(items)}")
+            
+            before_len = len(collected_items)
+            found_old_posts = False  # 일주일 이전 게시글이 있는지 확인
+            
+            for item in items:
+                url = item.get('url', '')
+                title = item.get('title', '')
+                date_text = item.get('dateText', '')
+                
+                # 날짜 필터링 (일주일 전까지)
+                if date_text:
+                    post_date = self._parse_date(date_text)
+                    if post_date:
+                        if post_date < week_ago:
+                            print(f"🫛 제외: 일주일 이전 게시글 - {date_text}")
+                            found_old_posts = True  # 일주일 이전 게시글이 발견됨
+                            continue
+                    else:
+                        # 날짜 파싱 실패 시 제외 (명확한 날짜가 필요)
+                        print(f"🫛 날짜 파싱 실패, 제외: {date_text}")
+                        continue
+                else:
+                    # 날짜 정보가 없으면 제외
+                    print(f"🫛 날짜 정보 없음, 제외")
+                    continue
+                
+                # 중복 체크 (URL 기반)
+                if url and url not in [item['url'] for item in collected_items]:
+                    collected_items.append(item)
+            
+            after_len = len(collected_items)
+            new_count = after_len - before_len
+            print(f"🫛 [페이지 {current_page}] 신규 수집: {new_count}개, 누적: {after_len}개")
+            
+            # 일주일 이전 게시글만 나오면 종료
+            if found_old_posts and new_count == 0:
+                print(f"🫛 일주일 이전 게시글만 남아 수집 종료")
+                break
+            
+            # max_posts 제한이 있으면 체크 (디버깅용)
+            if max_posts and len(collected_items) >= max_posts:
+                print(f"🫛 max_posts({max_posts})에 도달하여 수집 종료")
+                break
+            
+            # 다음 페이지로 이동
+            if current_page < max_pages:
+                next_page_clicked = False
+                try:
+                    # 방법 1: 다음 페이지 번호 버튼 찾기 (div.bottom-list a.num)
+                    next_page_num = current_page + 1
+                    
+                    # div.bottom-list 내부의 페이지 번호 버튼 찾기
+                    next_page_button = await self.page.query_selector(f'div.bottom-list a.num:has-text("{next_page_num}")')
+                    if not next_page_button:
+                        # href로 찾기
+                        next_page_button = await self.page.query_selector(f'div.bottom-list a.num[href*="page={next_page_num}"]')
+                    if not next_page_button:
+                        # 일반적으로 다음 페이지 번호 찾기
+                        next_page_button = await self.page.query_selector(f'a.num:has-text("{next_page_num}")')
+                    
+                    if next_page_button:
+                        await next_page_button.click()
+                        next_page_clicked = True
+                        print(f"🫛 페이지 {next_page_num} 버튼 클릭 성공")
+                    
+                    # 방법 2: class="next" 버튼 클릭 (10페이지 이후)
+                    if not next_page_clicked:
+                        next_button = await self.page.query_selector('div.bottom-list a.next, a.next')
+                        if next_button:
+                            # 비활성화 확인
+                            is_disabled = await next_button.get_attribute('disabled')
+                            if not is_disabled:
+                                await next_button.click()
+                                next_page_clicked = True
+                                print(f"🫛 다음 버튼(next) 클릭 성공 - 페이지 {next_page_num} 표시 예정")
+                    
+                    if next_page_clicked:
+                        await self.page.wait_for_timeout(3000)
+                        # 페이지가 실제로 변경되었는지 확인
+                        current_url = self.page.url
+                        if 'page=' in current_url:
+                            page_match = re.search(r'page=(\d+)', current_url)
+                            if page_match:
+                                current_page = int(page_match.group(1))
+                                print(f"🫛 페이지 {current_page} 로드 완료 (URL 확인)")
+                            else:
+                                # URL에 페이지 번호가 없으면 활성 페이지 번호 확인
+                                active_page = await self.page.evaluate("""
+                                    (() => {
+                                        const activeLink = document.querySelector('div.bottom-list a.num.on');
+                                        if (activeLink) {
+                                            return parseInt(activeLink.innerText.trim());
+                                        }
+                                        return null;
+                                    })()
+                                """)
+                                if active_page:
+                                    current_page = active_page
+                                    print(f"🫛 페이지 {current_page} 로드 완료 (활성 페이지 확인)")
+                                else:
+                                    current_page += 1
+                                    print(f"🫛 페이지 {current_page} 로드 완료 (추정)")
+                        else:
+                            # URL에 페이지 번호가 없으면 활성 페이지 번호 확인
+                            active_page = await self.page.evaluate("""
+                                (() => {
+                                    const activeLink = document.querySelector('div.bottom-list a.num.on');
+                                    if (activeLink) {
+                                        return parseInt(activeLink.innerText.trim());
+                                    }
+                                    return null;
+                                })()
+                            """)
+                            if active_page:
+                                current_page = active_page
+                                print(f"🫛 페이지 {current_page} 로드 완료 (활성 페이지 확인)")
+                            else:
+                                current_page += 1
+                                print(f"🫛 페이지 {current_page} 로드 완료 (추정)")
+                    else:
+                        print(f"🫛❌ 다음 페이지 버튼을 찾지 못함. 수집 종료")
+                        break
+                        
+                except Exception as e:
+                    print(f"🫛❌ 페이지네이션 클릭 오류: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    break
+            else:
+                print(f"🫛 최대 페이지({max_pages})에 도달하여 수집 종료")
+                break
+        
+        # max_posts 제한 적용
+        if max_posts:
+            post_items = collected_items[:max_posts]
+        else:
+            post_items = collected_items
+        
+        print(f"🫛 총 {len(post_items)}개 인기글 수집 완료 (총 {current_page}페이지 순회)")
+        return post_items
+    
+    def _parse_date(self, date_text: str) -> Optional[datetime]:
+        """날짜 텍스트를 datetime으로 변환 (목록 페이지용)"""
+        if not date_text:
+            return None
+        
         try:
-            likes_text = await self.safe_get_text('.recommend_count')
-            if likes_text:
-                numbers = re.findall(r'\d+', likes_text)
-                if numbers:
-                    return int(numbers[0])
-        except Exception:
-            pass
-        return 0
+            # 형식 1: "23:08:03" (오늘 날짜 - 시간만 표시)
+            if re.match(r'^\d{2}:\d{2}:\d{2}$', date_text.strip()):
+                today = datetime.now()
+                time_parts = date_text.strip().split(':')
+                return today.replace(hour=int(time_parts[0]), minute=int(time_parts[1]), second=int(time_parts[2]), microsecond=0)
+            
+            # 형식 2: "25/11/02" (YY/MM/DD)
+            if re.match(r'^\d{2}/\d{2}/\d{2}$', date_text.strip()):
+                parts = date_text.strip().split('/')
+                year = 2000 + int(parts[0])
+                month = int(parts[1])
+                day = int(parts[2])
+                return datetime(year, month, day)
+            
+            # 형식 3: "2025-11-02 09:33" (YYYY-MM-DD HH:MM) - 상세 페이지 형식도 지원
+            match = re.search(r'(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})', date_text)
+            if match:
+                year = int(match.group(1))
+                month = int(match.group(2))
+                day = int(match.group(3))
+                hour = int(match.group(4))
+                minute = int(match.group(5))
+                return datetime(year, month, day, hour, minute)
+            
+            # 형식 4: "2025.11.02. 12:39" (YYYY.MM.DD. HH:MM)
+            match = re.search(r'(\d{4})\.(\d{1,2})\.(\d{1,2})\.?\s*(\d{1,2}):(\d{1,2})', date_text)
+            if match:
+                year = int(match.group(1))
+                month = int(match.group(2))
+                day = int(match.group(3))
+                hour = int(match.group(4))
+                minute = int(match.group(5))
+                return datetime(year, month, day, hour, minute)
+            
+        except Exception as e:
+            print(f"🫛 날짜 파싱 오류: {date_text} - {e}")
+            return None
+        
+        return None
+    
+    async def _extract_post_data(self, post_url: str, comment_cnt: int, title_from_list: str) -> Optional[Post]:
+        """게시글 상세 페이지에서 데이터 추출"""
+        try:
+            # 제목 추출
+            title = title_from_list
+            title_elem = await self.page.query_selector('span.topTitle, .topTitle, h1, [class*="title"]')
+            if title_elem:
+                title_text = await title_elem.inner_text()
+                if title_text and title_text.strip():
+                    title = title_text.strip()
+            
+            # 카테고리 추출
+            category = ''
+            category_match = re.search(r'^\[([^\]]+)\]', title)
+            if category_match:
+                category = category_match.group(1)
+            
+            # 본문 내용 추출 (텍스트만)
+            content = ""
+            content_selectors = [
+                '.board-contents',
+                '[class*="contents"]',
+                '[class*="content"]',
+                '.view_content',
+                '#article'
+            ]
+            
+            for sel in content_selectors:
+                try:
+                    content_elem = await self.page.query_selector(sel)
+                    if content_elem:
+                        content = await content_elem.inner_text()
+                        if content:
+                            # 줄바꿈 정리 (빈 줄 제거)
+                            lines = [line.strip() for line in content.split('\n') if line.strip()]
+                            content = '\n'.join(lines)
+                            if len(content) > 10:
+                                print(f"🫛 본문 추출 성공 (선택자: {sel}): {len(content)}자")
+                                break
+                except Exception as e:
+                    continue
+            
+            # 조회수 추출 ("조회수" 텍스트 이후 값)
+            view_cnt = 0
+            try:
+                page_text = await self.page.evaluate("document.body.innerText")
+                view_match = re.search(r'조회수\s*[:：]?\s*([\d,]+)', page_text)
+                if view_match:
+                    view_num_str = view_match.group(1).replace(',', '')
+                    view_cnt = int(view_num_str)
+                    print(f"🫛 조회수 추출 성공: {view_match.group(1)} -> {view_cnt}")
+            except Exception as e:
+                pass
+            
+            # 좋아요 수 추출 (span.topTitle-rec em 태그 내 숫자)
+            like_cnt = 0
+            try:
+                rec_span = await self.page.query_selector('span.topTitle-rec')
+                if rec_span:
+                    em_tag = await rec_span.query_selector('em')
+                    if em_tag:
+                        like_text = await em_tag.inner_text()
+                        like_match = re.search(r'(\d+)', like_text)
+                        if like_match:
+                            like_cnt = int(like_match.group(1))
+                            print(f"🫛 추천수 추출 성공: {like_text} -> {like_cnt}")
+            except Exception as e:
+                pass
+            
+            # 작성일시 추출 ("등록일" 이후 값) - ul.topTitle-mainbox li 요소에서 추출
+            created_at = None
+            try:
+                # 방법 1: ul.topTitle-mainbox li 요소에서 "등록일 YYYY-MM-DD HH:MM" 형식 찾기
+                mainbox = await self.page.query_selector('ul.topTitle-mainbox')
+                if mainbox:
+                    li_elements = await mainbox.query_selector_all('li')
+                    for li in li_elements:
+                        li_text = await li.inner_text()
+                        # "등록일 2025-11-02 09:33" 형식 찾기
+                        date_match = re.search(r'등록일\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})', li_text)
+                        if date_match:
+                            date_str = date_match.group(1).strip()
+                            try:
+                                created_at = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
+                                print(f"🫛 날짜 파싱 성공 (topTitle-mainbox): {date_str} -> {created_at}")
+                                break
+                            except:
+                                continue
+                
+                # 방법 2: 페이지 텍스트에서 "등록일 YYYY-MM-DD HH:MM" 형식 찾기
+                if not created_at:
+                    page_text = await self.page.evaluate("document.body.innerText")
+                    date_match = re.search(r'등록일\s+(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2})', page_text)
+                    if date_match:
+                        date_str = date_match.group(1).strip()
+                        try:
+                            created_at = datetime.strptime(date_str, '%Y-%m-%d %H:%M')
+                            print(f"🫛 날짜 파싱 성공 (전체 텍스트): {date_str} -> {created_at}")
+                        except:
+                            pass
+                
+                # 방법 3: 기존 패턴 (YY/MM/DD 또는 HH:MM:SS) - 하위 호환성
+                if not created_at:
+                    page_text = await self.page.evaluate("document.body.innerText")
+                    date_match = re.search(r'등록일[^\n]*[:：]?\s*(\d{2}/\d{2}/\d{2}|\d{2}:\d{2}:\d{2})', page_text)
+                    if date_match:
+                        date_text = date_match.group(1).strip()
+                        created_at = self._parse_date(date_text)
+                        if created_at:
+                            print(f"🫛 날짜 파싱 성공 (기존 패턴): {date_text} -> {created_at}")
+            except Exception as e:
+                print(f"🫛 날짜 추출 오류: {e}")
+            
+            # URL 추출 (span.topTitle-copy 클릭하여 클립보드에서 가져오기)
+            actual_url = post_url
+            try:
+                copy_span = await self.page.query_selector('span.topTitle-copy')
+                if copy_span:
+                    await copy_span.click()
+                    await self.page.wait_for_timeout(500)
+                    # 클립보드에서 URL 가져오기
+                    clipboard_text = await self.page.evaluate("navigator.clipboard.readText()")
+                    if clipboard_text and ('ppomppu.co.kr' in clipboard_text or 'view.php' in clipboard_text):
+                        actual_url = clipboard_text
+                        print(f"🫛 URL 클립보드 복사 성공: {actual_url}")
+            except Exception as e:
+                # 클립보드 접근 실패 시 원본 URL 사용
+                pass
+            
+            # 게시글 ID 추출 (URL에서)
+            article_id = None
+            id_match = re.search(r'no=(\d+)', post_url)
+            if id_match:
+                article_id = int(id_match.group(1))
+            
+            # own_company: 제목에 "롯데온"이 있으면 1, 없으면 0
+            own_company = 1 if title and '롯데온' in title else 0
+            
+            print(f"🫛 추출 완료: title={title[:30]}..., view_cnt={view_cnt}, comment_cnt={comment_cnt}, like_cnt={like_cnt}")
+            
+            return Post(
+                id=article_id,
+                channel=self.channel,
+                category=category,
+                title=title.strip() if title else "",
+                content=content.strip() if content else "",
+                view_cnt=view_cnt,
+                like_cnt=like_cnt,
+                comment_cnt=comment_cnt,
+                created_at=created_at,
+                own_company=own_company,
+                url=actual_url
+            )
+                
+        except Exception as e:
+            print(f"🫛 게시글 데이터 추출 오류: {e}")
+            import traceback
+            traceback.print_exc()
+            return None

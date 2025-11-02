@@ -21,12 +21,43 @@ class BaseCrawler(ABC):
     
     async def __aenter__(self):
         self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(headless=self.headless)
-        self.page = await self.browser.new_page()
+        # 브라우저 컨텍스트 옵션 설정
+        context_options = {
+            'user_agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'viewport': {'width': 1920, 'height': 1080},
+            'locale': 'ko-KR',
+            'timezone_id': 'Asia/Seoul',
+        }
+        # headless 모드일 때 추가 옵션
+        browser_options = {
+            'headless': self.headless,
+        }
+        if not self.headless:
+            browser_options['args'] = ['--disable-blink-features=AutomationControlled']
+        
+        self.browser = await self.playwright.chromium.launch(**browser_options)
+        self.context = await self.browser.new_context(**context_options)
+        self.page = await self.context.new_page()
+        
+        # 추가 헤더 설정
+        await self.page.set_extra_http_headers({
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+            'Cache-Control': 'max-age=0'
+        })
+        
         self.page.set_default_timeout(self.timeout)
         return self
     
     async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if hasattr(self, 'context') and self.context:
+            await self.context.close()
         if self.browser:
             await self.browser.close()
         if self.playwright:

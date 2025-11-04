@@ -375,11 +375,12 @@ class FmkoreaCrawler(BaseCrawler):
             
             # 본문 내용 추출 (텍스트만, 이미지 제외, URL 및 탭 문자 제거)
             content = ""
+            # 더 정확한 선택자 우선 사용
             content_selectors = [
+                'div[class*="document_"][class*="_content"]',  # document_*_content 패턴
                 '.rd_body',
                 '.xe_content',
-                '[class*="content"]',
-                '[class*="body"]',
+                'div[class*="content"]:not([class*="search"]):not([class*="keyword"])',  # 검색어 관련 제외
                 '.document_content',
                 'div[class*="article"]'
             ]
@@ -388,27 +389,139 @@ class FmkoreaCrawler(BaseCrawler):
                 try:
                     content_elem = await self.page.query_selector(sel)
                     if content_elem:
-                        # 이미지와 링크 제외하고 텍스트만 추출
+                        # 이미지와 링크 제외하고 텍스트만 추출 (div 요소 기준으로 줄바꿈 유지)
                         content = await content_elem.evaluate("""
                             (elem) => {
-                                // 이미지와 링크 제거
+                                // 이미지와 링크 제거 (링크는 제거하되 텍스트는 유지)
                                 const clone = elem.cloneNode(true);
-                                clone.querySelectorAll('img, a.highslide').forEach(el => el.remove());
-                                return clone.innerText.trim();
+                                
+                                // UI 요소 제거 (검색어, 추천 등)
+                                clone.querySelectorAll('[class*="search"], [class*="keyword"], [class*="recommend"], [id*="search"], [id*="keyword"]').forEach(el => el.remove());
+                                
+                                // 이미지 제거
+                                clone.querySelectorAll('img').forEach(el => el.remove());
+                                
+                                // 링크는 제거하되 텍스트 노드는 유지 (하지만 URL 자체는 제거)
+                                clone.querySelectorAll('a').forEach(link => {
+                                    // 링크의 href가 URL이면 링크 자체를 제거
+                                    const href = link.getAttribute('href') || '';
+                                    if (href.startsWith('http') || href.startsWith('//')) {
+                                        // 링크를 부모 노드로 대체 (텍스트는 유지)
+                                        const parent = link.parentNode;
+                                        while (link.firstChild) {
+                                            parent.insertBefore(link.firstChild, link);
+                                        }
+                                        parent.removeChild(link);
+                                    } else {
+                                        // 상대 링크는 텍스트만 유지하고 링크 제거
+                                        const textNode = document.createTextNode(link.innerText || link.textContent || '');
+                                        link.parentNode.replaceChild(textNode, link);
+                                    }
+                                });
+                                
+                                // 직접 자식 div만 선택 (중첩 div 제외)
+                                const lines = [];
+                                const directChildDivs = Array.from(clone.children).filter(child => child.tagName.toLowerCase() === 'div');
+                                
+                                // 직접 자식 div가 있는 경우
+                                if (directChildDivs.length > 0) {
+                                    directChildDivs.forEach(div => {
+                                        // "== $0" 같은 개발자 도구 표시는 제외
+                                        const text = div.innerText.trim();
+                                        // UI 관련 텍스트 필터링
+                                        if (text && 
+                                            !text.match(/^==\\s*\\$\\d+$/) &&
+                                            !text.includes('불러오는 중입니다') &&
+                                            !text.includes('검색어') &&
+                                            !text.includes('추천') &&
+                                            !text.includes('OFF') &&
+                                            !text.includes('저장') &&
+                                            text.length > 5) {  // 너무 짧은 텍스트 제외
+                                            // URL 패턴 제거 (http:// 또는 https://로 시작하는 텍스트)
+                                            const cleanText = text.replace(/https?:\\/\\/[^\\s]+/gi, '').trim();
+                                            if (cleanText && cleanText !== '== $0' && !cleanText.match(/^https?:/)) {
+                                                lines.push(cleanText);
+                                            }
+                                        }
+                                    });
+                                }
+                                
+                                // 직접 자식 div가 없으면 모든 div를 시도 (하지만 중복 제거)
+                                if (lines.length === 0) {
+                                    const allDivs = clone.querySelectorAll('div');
+                                    const seenTexts = new Set();
+                                    allDivs.forEach(div => {
+                                        const text = div.innerText.trim();
+                                        // UI 관련 텍스트 필터링
+                                        if (text && 
+                                            !text.match(/^==\\s*\\$\\d+$/) && 
+                                            !seenTexts.has(text) &&
+                                            !text.includes('불러오는 중입니다') &&
+                                            !text.includes('검색어') &&
+                                            !text.includes('추천') &&
+                                            !text.includes('OFF') &&
+                                            !text.includes('저장') &&
+                                            text.length > 5) {
+                                            // 자식 div가 없는 경우만 추가 (리프 노드만)
+                                            if (div.querySelectorAll('div').length === 0) {
+                                                // URL 패턴 제거
+                                                const cleanText = text.replace(/https?:\\/\\/[^\\s]+/gi, '').trim();
+                                                if (cleanText && !cleanText.match(/^https?:/)) {
+                                                    seenTexts.add(cleanText);
+                                                    lines.push(cleanText);
+                                                }
+                                            }
+                                        }
+                                    });
+                                }
+                                
+                                // div로 추출한 내용이 있으면 사용
+                                if (lines.length > 0) {
+                                    return lines.join('\\n');
+                                }
+                                
+                                // fallback: innerText 사용 (URL 제거, UI 텍스트 필터링)
+                                let innerText = clone.innerText || clone.textContent || '';
+                                innerText = innerText.replace(/https?:\\/\\/[^\\s]+/gi, '').trim();
+                                // UI 관련 텍스트 제거
+                                innerText = innerText.replace(/[^\\n]*불러오는 중입니다[^\\n]*/g, '');
+                                innerText = innerText.replace(/[^\\n]*검색어[^\\n]*/g, '');
+                                innerText = innerText.replace(/[^\\n]*추천[^\\n]*/g, '');
+                                return innerText.trim();
                             }
                         """)
                         if content:
-                            # URL 제거 (https://www.fmkorea.com/숫자 패턴)
-                            content = re.sub(r'https://www\.fmkorea\.com/\d+', '', content)
+                            # URL 제거 (모든 http:// 또는 https:// 패턴)
+                            content = re.sub(r'https?://[^\s]+', '', content)
                             # "복사" 텍스트 제거
                             content = re.sub(r'복사\s*', '', content)
-                            # 탭 문자(\t) 제거
+                            # "== $0" 같은 개발자 도구 표시 제거
+                            content = re.sub(r'==\s*\$\d+', '', content)
+                            # UI 관련 텍스트 제거
+                            content = re.sub(r'[^\n]*불러오는 중입니다[^\n]*', '', content)
+                            content = re.sub(r'[^\n]*검색어[^\n]*', '', content)
+                            content = re.sub(r'[^\n]*추천[^\n]*', '', content)
+                            content = re.sub(r'[^\n]*OFF[^\n]*', '', content)
+                            content = re.sub(r'[^\n]*저장[^\n]*', '', content)
+                            # 탭 문자(\t)를 공백으로 변환
                             content = content.replace('\t', ' ')
-                            # 연속된 공백 정리
-                            content = re.sub(r'\s+', ' ', content)
-                            # 줄바꿈 정리
-                            lines = [line.strip() for line in content.split('\n') if line.strip()]
-                            content = '\n'.join(lines)
+                            # 줄바꿈을 유지하면서 각 줄 내의 연속된 공백만 정리
+                            lines = content.split('\n')
+                            cleaned_lines = []
+                            for line in lines:
+                                # 각 줄 내의 연속된 공백만 정리 (줄바꿈은 유지)
+                                # URL 패턴이 남아있으면 제거
+                                cleaned_line = re.sub(r'https?://[^\s]+', '', line.strip())
+                                cleaned_line = re.sub(r' +', ' ', cleaned_line)
+                                # UI 관련 텍스트 제거
+                                if (cleaned_line and 
+                                    not cleaned_line.startswith('http') and
+                                    '불러오는 중입니다' not in cleaned_line and
+                                    '검색어' not in cleaned_line and
+                                    '추천' not in cleaned_line and
+                                    len(cleaned_line) > 5):  # 너무 짧은 텍스트 제외
+                                    cleaned_lines.append(cleaned_line)
+                            content = '\n'.join(cleaned_lines)
                             if len(content) > 10:
                                 print(f"🫛 본문 추출 성공 (선택자: {sel}): {len(content)}자")
                                 break

@@ -33,10 +33,10 @@ class PpomppuCrawler(BaseCrawler):
                         print(f"🫛 페이지 응답 상태: {response.status}")
                         if response.status != 200:
                             raise Exception(f"HTTP 상태 코드 오류: {response.status}")
-                    
+            
                     # 페이지 로딩 대기 (동적 콘텐츠 고려)
                     await self.page.wait_for_timeout(3000)
-                    
+            
                     # 페이지 내용 확인
                     page_title = await self.page.title()
                     print(f"🫛 페이지 제목: {page_title[:50]}...")
@@ -109,7 +109,7 @@ class PpomppuCrawler(BaseCrawler):
                         timeout=30000
                     )
                     await self.page.wait_for_timeout(1000)
-                    
+                        
                     # 게시글 데이터 추출
                     post = await self._extract_post_data(post_url, comment_cnt, title)
                     if post:
@@ -447,39 +447,181 @@ class PpomppuCrawler(BaseCrawler):
     async def _extract_post_data(self, post_url: str, comment_cnt: int, title_from_list: str) -> Optional[Post]:
         """게시글 상세 페이지에서 데이터 추출"""
         try:
-            # 제목 추출
+            # 제목 추출 (h1 태그에서 직접 텍스트 노드 추출)
             title = title_from_list
-            title_elem = await self.page.query_selector('span.topTitle, .topTitle, h1, [class*="title"]')
+            # h1 태그를 우선적으로 찾기
+            title_elem = await self.page.query_selector('h1')
+            if not title_elem:
+                # h1이 없으면 다른 선택자 시도
+                title_elem = await self.page.query_selector('span.topTitle, .topTitle, [class*="title"]')
+            
             if title_elem:
-                title_text = await title_elem.inner_text()
-                if title_text and title_text.strip():
-                    title = title_text.strip()
+                # h1 태그인 경우: 이미지, 카테고리 span, 댓글 수 span 제외하고 텍스트만 추출
+                if await title_elem.evaluate('el => el.tagName.toLowerCase() === "h1"'):
+                    title_text = await title_elem.evaluate("""
+                        (elem) => {
+                            // 이미지, 카테고리 span, 댓글 수 span 제거
+                            const clone = elem.cloneNode(true);
+                            clone.querySelectorAll('img, span#comment, span[id*="comment"], span.subject_preface, span[class*="preface"], span[class*="subject"]').forEach(el => el.remove());
+                            // 텍스트만 추출 (실제 제목 텍스트만)
+                            return clone.innerText.trim();
+                        }
+                    """)
+                    if title_text and title_text.strip():
+                        title = title_text.strip()
+                else:
+                    # h1이 아닌 경우 기존 방식 사용
+                    title_text = await title_elem.inner_text()
+                    if title_text and title_text.strip():
+                        title = title_text.strip()
             
-            # 카테고리 추출
+            # 카테고리 추출 (원본 제목에서, h1에서 추출한 경우 카테고리 span에서 직접 추출)
             category = ''
-            category_match = re.search(r'^\[([^\]]+)\]', title)
-            if category_match:
-                category = category_match.group(1)
+            if title_elem and await title_elem.evaluate('el => el.tagName.toLowerCase() === "h1"'):
+                # h1에서 카테고리 span 직접 추출
+                category_text = await title_elem.evaluate("""
+                    (elem) => {
+                        const categorySpan = elem.querySelector('span.subject_preface, span[class*="preface"], span[class*="subject"]');
+                        if (categorySpan) {
+                            const text = categorySpan.innerText.trim();
+                            // [네이버] 형식에서 네이버만 추출
+                            const match = text.match(/\\[([^\\]]+)\\]/);
+                            return match ? match[1] : text;
+                        }
+                        return '';
+                    }
+                """)
+                if category_text:
+                    category = category_text
             
-            # 본문 내용 추출 (텍스트만)
+            # 카테고리 추출 (fallback: 제목에서 패턴 매칭)
+            if not category:
+                category_match = re.search(r'^\[([^\]]+)\]', title)
+                if category_match:
+                    category = category_match.group(1)
+            
+            # 본문 내용 추출 (텍스트만, UI 요소 제외)
             content = ""
             content_selectors = [
+                'table.board-contents',  # 더 정확한 선택자
+                '.board-contents table',
                 '.board-contents',
-                '[class*="contents"]',
-                '[class*="content"]',
+                '[class*="contents"]:not([class*="menu"]):not([class*="nav"])',
                 '.view_content',
                 '#article'
+            ]
+            
+            # UI 관련 텍스트 목록 (본문이 아닌 것으로 판단)
+            # 주의: 실제 본문에도 포함될 수 있는 일반적인 단어는 제외
+            ui_keywords = [
+                '뽐뿌', '이벤트', '정보', '커뮤니티', '갤러리', '장터', '포럼', '뉴스', '상담실',
+                '로그인', '회원가입', '아이디비번찾기', '뽐뿌게시판', '사용기', '구매후기',
+                '쿠폰게시판', '쇼핑포럼', '뽐뿌핫딜', '목록보기', '최신순', '작성순',
+                '알림', '광고성 게시글', '에디터', 'HTML편집', '미리보기', '짤방',
+                '업자신고', '다른의견', '이전글', '다음글', '등록일', '조회수', '추천하기',
+                '질렀어요 신고', '첨부파일', '같이 보면 좋은 상품',  # '상품' 단독 제거, '같이 보면 좋은 상품'만
+                '구매하셨다면', '후기를 남겨주세요', '구매후기 쓰기'
             ]
             
             for sel in content_selectors:
                 try:
                     content_elem = await self.page.query_selector(sel)
                     if content_elem:
-                        content = await content_elem.inner_text()
-                        if content:
+                        # UI 요소 제거하고 텍스트만 추출
+                        content_text = await content_elem.evaluate("""
+                            (elem) => {
+                                const clone = elem.cloneNode(true);
+                                
+                                // 메뉴, 네비게이션, 사이드바 제거
+                                clone.querySelectorAll('[class*="menu"], [class*="nav"], [class*="sidebar"], [id*="menu"], [id*="nav"], [id*="sidebar"]').forEach(el => el.remove());
+                                
+                                // 댓글 영역 제거
+                                clone.querySelectorAll('[class*="comment"], [class*="reply"], [id*="comment"], [id*="reply"], [class*="reply_box"], [class*="comment_box"]').forEach(el => el.remove());
+                                
+                                // 추천하기, 다른의견, 질렀어요 신고, 첨부파일, 이전글/다음글 버튼 제거
+                                clone.querySelectorAll('[class*="recommend"], [class*="like"], [class*="attach"], [class*="prev"], [class*="next"], [class*="list"]').forEach(el => el.remove());
+                                
+                                // "같이 보면 좋은 상품" 영역 제거 (정확한 문구로만)
+                                const relatedProducts = Array.from(clone.querySelectorAll('*')).filter(el => {
+                                    const text = el.innerText || el.textContent || '';
+                                    // 정확히 "같이 보면 좋은 상품" 또는 유사한 패턴만 제거
+                                    return text.includes('같이 보면 좋은') && (text.includes('상품') || text.includes('추천'));
+                                });
+                                relatedProducts.forEach(el => el.remove());
+                                
+                                // "구매하셨다면" 같은 안내 문구 제거
+                                const guideTexts = Array.from(clone.querySelectorAll('*')).filter(el => {
+                                    const text = el.innerText || el.textContent || '';
+                                    return text.includes('구매하셨다면') || text.includes('후기를 남겨주세요') || text.includes('구매후기 쓰기');
+                                });
+                                guideTexts.forEach(el => el.remove());
+                                
+                                // 이미지 제거
+                                clone.querySelectorAll('img').forEach(el => el.remove());
+                                
+                                // 링크는 제거하되 텍스트는 유지 (URL은 제거)
+                                clone.querySelectorAll('a').forEach(link => {
+                                    const href = link.getAttribute('href') || '';
+                                    // URL 링크는 제거
+                                    if (href.startsWith('http') || href.startsWith('//')) {
+                                        link.remove();
+                                    } else {
+                                        // 상대 링크는 텍스트만 유지
+                                        const textNode = document.createTextNode(link.innerText || link.textContent || '');
+                                        link.parentNode.replaceChild(textNode, link);
+                                    }
+                                });
+                                
+                                return clone.innerText || clone.textContent || '';
+                            }
+                        """)
+                        
+                        if content_text:
                             # 줄바꿈 정리 (빈 줄 제거)
-                            lines = [line.strip() for line in content.split('\n') if line.strip()]
-                            content = '\n'.join(lines)
+                            lines = [line.strip() for line in content_text.split('\n') if line.strip()]
+                            
+                            # 메타 정보 라인 제거 (등록일, 조회수, 추천 등)
+                            filtered_lines = []
+                            for line in lines:
+                                # 메타 정보 패턴 제외
+                                if (re.match(r'^(등록일|조회수|추천)\s*\d+', line) or
+                                    re.match(r'^\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}', line) or  # 날짜 패턴
+                                    re.match(r'^https?://', line) or  # URL
+                                    re.match(r'^\d+원$', line) or  # 가격만 있는 라인
+                                    line in ['등록일', '조회수', '추천', '추천하기', '다른의견', '질렀어요 신고']):
+                                    continue
+                                filtered_lines.append(line)
+                            
+                            content = '\n'.join(filtered_lines)
+                            
+                            # UI 키워드가 많이 포함되어 있는지 확인 (정확한 매칭)
+                            # 각 라인에서 UI 키워드가 포함되어 있는지 확인
+                            ui_keyword_lines = 0
+                            for line in filtered_lines:
+                                for keyword in ui_keywords:
+                                    if keyword in line:
+                                        ui_keyword_lines += 1
+                                        break  # 한 라인에서 하나의 키워드만 카운트
+                            
+                            total_lines = len(filtered_lines)
+                            ui_ratio = ui_keyword_lines / max(total_lines, 1) if total_lines > 0 else 0
+                            
+                            # 실제 본문이 있는지 확인 (일정 길이 이상의 연속된 텍스트가 있는지)
+                            has_meaningful_content = False
+                            for line in filtered_lines:
+                                # UI 키워드가 포함되지 않은 라인 중 길이가 충분한 라인이 있는지
+                                is_ui_line = any(keyword in line for keyword in ui_keywords)
+                                if not is_ui_line and len(line) > 20:  # 20자 이상의 의미있는 본문 라인
+                                    has_meaningful_content = True
+                                    break
+                            
+                            # UI 키워드 비율이 높고(50% 이상) 의미있는 본문이 없으면 본문 없는 것으로 판단
+                            # 또는 UI 키워드 라인이 10개 이상이면 본문 없는 것으로 판단
+                            if (ui_ratio >= 0.5 and not has_meaningful_content) or ui_keyword_lines >= 10:
+                                print(f"🫛 UI 요소가 많이 포함되어 본문 없는 것으로 판단 (UI 키워드 라인: {ui_keyword_lines}개, 비율: {ui_ratio:.2f}, 의미있는 본문: {has_meaningful_content})")
+                                content = ""  # 본문이 없는 것으로 처리
+                                continue  # 다음 선택자 시도
+                            
                             if len(content) > 10:
                                 print(f"🫛 본문 추출 성공 (선택자: {sel}): {len(content)}자")
                                 break
@@ -582,14 +724,20 @@ class PpomppuCrawler(BaseCrawler):
             # own_company: 제목에 "롯데온"이 있으면 1, 없으면 0
             own_company = 1 if title and '롯데온' in title else 0
             
+            # content가 없거나 의미있는 내용이 없으면 None 반환 (pass)
+            content_cleaned = content.strip() if content else ""
+            if not content_cleaned or len(content_cleaned) < 10:
+                print(f"🫛 content가 없어서 게시물 제외: {post_url}")
+                return None
+            
             print(f"🫛 추출 완료: title={title[:30]}..., view_cnt={view_cnt}, comment_cnt={comment_cnt}, like_cnt={like_cnt}")
             
             return Post(
                 id=article_id,
                 channel=self.channel,
-                category=category,
+                category="",  # category는 빈 문자열로 고정
                 title=title.strip() if title else "",
-                content=content.strip() if content else "",
+                content=content_cleaned,
                 view_cnt=view_cnt,
                 like_cnt=like_cnt,
                 comment_cnt=comment_cnt,

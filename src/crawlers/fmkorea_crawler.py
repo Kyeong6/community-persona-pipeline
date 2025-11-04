@@ -619,6 +619,12 @@ class FmkoreaCrawler(BaseCrawler):
             except Exception as e:
                 print(f"🫛 URL 추출 오류: {e}")
             
+            # content가 없거나 의미있는 내용이 없으면 None 반환 (pass)
+            content_cleaned = content.strip() if content else ""
+            if not content_cleaned or len(content_cleaned) < 10:
+                print(f"🫛 content가 없어서 게시물 제외: {post_url}")
+                return None
+            
             print(f"🫛 추출 완료: title={title[:30]}..., view_cnt={view_cnt}, comment_cnt={comment_cnt}, like_cnt={like_cnt}, own_company={own_company}")
             
             return Post(
@@ -626,7 +632,7 @@ class FmkoreaCrawler(BaseCrawler):
                 channel=self.channel,
                 category="",
                 title=title.strip() if title else "",
-                content=content.strip() if content else "",
+                content=content_cleaned,
                 view_cnt=view_cnt,
                 like_cnt=like_cnt,
                 comment_cnt=comment_cnt,

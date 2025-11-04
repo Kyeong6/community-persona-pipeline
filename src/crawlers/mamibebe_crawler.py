@@ -57,7 +57,7 @@ class MamibebeCrawler(BaseCrawler):
                             if '증권 추천인' in title_normalized or '피자만들기 추천인' in title_normalized:
                                 print(f"🫛 제외: 카카오페이 추천인 게시물 (상세) - {title_normalized[:50]}")
                                 continue
-                    posts.append(post)
+                        posts.append(post)
                     
                     # 요청 간격 조절
                     await self.page.wait_for_timeout(1000)
@@ -677,6 +677,12 @@ class MamibebeCrawler(BaseCrawler):
             # own_company: 제목에 "롯데온"이 있으면 1, 없으면 0
             own_company = 1 if title and '롯데온' in title else 0
             
+            # content가 없거나 의미있는 내용이 없으면 None 반환 (pass)
+            content_cleaned = content.strip() if content else ""
+            if not content_cleaned or len(content_cleaned) < 10:
+                print(f"🫛 content가 없어서 게시물 제외: {post_url}")
+                return None
+            
             print(f"🫛 추출 완료: title={title[:30]}..., view_cnt={view_cnt}, comment_cnt={comment_cnt}, like_cnt={like_cnt}")
             
             return Post(
@@ -684,7 +690,7 @@ class MamibebeCrawler(BaseCrawler):
                 channel=self.channel,  # "mam2bebe" 고정
                 category=category,
                 title=title.strip() if title else "",
-                content=content.strip() if content else "",
+                content=content_cleaned,
                 view_cnt=view_cnt,
                 like_cnt=like_cnt,
                 comment_cnt=comment_cnt,

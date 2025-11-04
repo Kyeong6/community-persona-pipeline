@@ -36,20 +36,6 @@ jobs:
       - name: Install project
         run: poetry install --no-interaction
       
-      - name: Configure environment variables
-        env:
-          NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
-          NAVER_ID: ${{ secrets.NAVER_ID }}
-          NAVER_PASSWORD: ${{ secrets.NAVER_PASSWORD }}
-          BROWSER_HEADLESS: 'true'
-          BROWSER_TIMEOUT: '60000'
-        run: |
-          echo "NAVER_COOKIE=${NAVER_COOKIE}" >> $GITHUB_ENV || true
-          echo "NAVER_ID=${NAVER_ID}" >> $GITHUB_ENV || true
-          echo "NAVER_PASSWORD=${NAVER_PASSWORD}" >> $GITHUB_ENV || true
-          echo "BROWSER_HEADLESS=true" >> $GITHUB_ENV
-          echo "BROWSER_TIMEOUT=60000" >> $GITHUB_ENV
-      
       - name: Run Mamibebe crawler
         env:
           NAVER_COOKIE: ${{ secrets.NAVER_COOKIE }}
@@ -72,6 +58,30 @@ jobs:
           name: crawling-results-${{ github.run_number }}
           path: outputs/
           retention-days: 30  # 30일간 보관
+      
+      - name: Deploy to production server
+        if: always()  # 크롤링 실패해도 배포 시도
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          source: "outputs/*"
+          target: ${{ secrets.SERVER_TARGET_PATH || '/tmp/crawling-results' }}
+          strip_components: 1
+        continue-on-error: true
+      
+      - name: Run server update script
+        if: always()
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          port: ${{ secrets.SERVER_PORT || 22 }}
+          script: ${{ secrets.SERVER_UPDATE_SCRIPT || 'echo "Update script not configured"' }}
+        continue-on-error: true
       
       - name: Summary
         if: always()

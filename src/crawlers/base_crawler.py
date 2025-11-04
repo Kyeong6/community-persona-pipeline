@@ -23,7 +23,7 @@ class BaseCrawler(ABC):
         self.playwright = await async_playwright().start()
         # 브라우저 컨텍스트 옵션 설정
         context_options = {
-            'user_agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'user_agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             'viewport': {'width': 1920, 'height': 1080},
             'locale': 'ko-KR',
             'timezone_id': 'Asia/Seoul',
@@ -34,10 +34,96 @@ class BaseCrawler(ABC):
         }
         if not self.headless:
             browser_options['args'] = ['--disable-blink-features=AutomationControlled']
+        else:
+            # headless 모드에서도 봇 탐지 우회를 위한 옵션
+            browser_options['args'] = [
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--no-sandbox'
+            ]
         
         self.browser = await self.playwright.chromium.launch(**browser_options)
         self.context = await self.browser.new_context(**context_options)
         self.page = await self.context.new_page()
+        
+        # 봇 탐지 우회를 위한 JavaScript 주입 (강화 버전)
+        await self.page.add_init_script("""
+            // navigator.webdriver 속성 제거
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            
+            // Chrome 객체 추가
+            window.chrome = {
+                runtime: {},
+                loadTimes: function() {},
+                csi: function() {},
+                app: {}
+            };
+            
+            // Permissions API 모킹
+            if (window.navigator.permissions && window.navigator.permissions.query) {
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                        Promise.resolve({ state: 'default' }) :
+                        originalQuery(parameters)
+                );
+            }
+            
+            // Plugins 추가
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            
+            // Languages 추가
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['ko-KR', 'ko', 'en-US', 'en']
+            });
+            
+            // WebGL Vendor/Renderer 모킹
+            const getParameter = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                if (parameter === 37445) {
+                    return 'Intel Inc.';
+                }
+                if (parameter === 37446) {
+                    return 'Intel Iris OpenGL Engine';
+                }
+                return getParameter(parameter);
+            };
+            
+            // Canvas Fingerprinting 방지
+            const originalToDataURL = HTMLCanvasElement.prototype.toDataURL;
+            HTMLCanvasElement.prototype.toDataURL = function() {
+                const context = this.getContext('2d');
+                if (context) {
+                    const imageData = context.getImageData(0, 0, this.width, this.height);
+                    for (let i = 0; i < imageData.data.length; i += 4) {
+                        imageData.data[i] += Math.floor(Math.random() * 10) - 5;
+                    }
+                    context.putImageData(imageData, 0, 0);
+                }
+                return originalToDataURL.apply(this, arguments);
+            };
+            
+            // AudioContext Fingerprinting 방지
+            if (window.AudioContext || window.webkitAudioContext) {
+                const AudioContext = window.AudioContext || window.webkitAudioContext;
+                const originalCreateAnalyser = AudioContext.prototype.createAnalyser;
+                AudioContext.prototype.createAnalyser = function() {
+                    const analyser = originalCreateAnalyser.apply(this, arguments);
+                    const originalGetFloatFrequencyData = analyser.getFloatFrequencyData;
+                    analyser.getFloatFrequencyData = function(array) {
+                        originalGetFloatFrequencyData.apply(this, arguments);
+                        for (let i = 0; i < array.length; i++) {
+                            array[i] += Math.random() * 0.0001;
+                        }
+                    };
+                    return analyser;
+                };
+            }
+        """)
         
         # 추가 헤더 설정
         await self.page.set_extra_http_headers({

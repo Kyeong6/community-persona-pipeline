@@ -6,6 +6,7 @@ import os
 import re
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from playwright.async_api import async_playwright
 
 load_dotenv()
 
@@ -16,6 +17,21 @@ class MamibebeCrawler(BaseCrawler):
         self.popular_url = "https://cafe.naver.com/f-e/cafes/29434212/popular"
         self.club_id = 29434212
         self.channel = "mam2bebe"
+    
+    async def __aenter__(self):
+        """맘이베베용 단순 브라우저 초기화 (기존 방식)"""
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(headless=self.headless)
+        self.page = await self.browser.new_page()
+        self.page.set_default_timeout(self.timeout)
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """맘이베베용 단순 브라우저 종료 (기존 방식)"""
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
     
     async def crawl(self, max_posts: int = None) -> List[Post]:
         """맘이베베 인기글 크롤링 (오늘 기준 일주일 전까지)"""
@@ -677,11 +693,7 @@ class MamibebeCrawler(BaseCrawler):
             # own_company: 제목에 "롯데온"이 있으면 1, 없으면 0
             own_company = 1 if title and '롯데온' in title else 0
             
-            # content가 없거나 의미있는 내용이 없으면 None 반환 (pass)
-            content_cleaned = content.strip() if content else ""
-            if not content_cleaned or len(content_cleaned) < 10:
-                print(f"🫛 content가 없어서 게시물 제외: {post_url}")
-                return None
+            # content가 없어도 게시물은 수집 (기존 코드와 동일하게)
             
             print(f"🫛 추출 완료: title={title[:30]}..., view_cnt={view_cnt}, comment_cnt={comment_cnt}, like_cnt={like_cnt}")
             
@@ -690,7 +702,7 @@ class MamibebeCrawler(BaseCrawler):
                 channel=self.channel,  # "mam2bebe" 고정
                 category=category,
                 title=title.strip() if title else "",
-                content=content_cleaned,
+                content=content.strip() if content else "",
                 view_cnt=view_cnt,
                 like_cnt=like_cnt,
                 comment_cnt=comment_cnt,

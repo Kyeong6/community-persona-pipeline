@@ -1,5 +1,4 @@
 import asyncio
-import json
 import os
 from datetime import datetime
 from dotenv import load_dotenv
@@ -7,13 +6,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from src.crawlers.fmkorea_crawler import FmkoreaCrawler
-
-
-def ensure_outputs_dir() -> str:
-    """outputs 디렉토리 생성"""
-    out_dir = os.path.join(os.getcwd(), "outputs")
-    os.makedirs(out_dir, exist_ok=True)
-    return out_dir
 
 
 async def main() -> None:
@@ -87,18 +79,8 @@ async def main() -> None:
             
             payload.append(item)
 
-        # JSON 파일로 저장
-        out_dir = ensure_outputs_dir()
-        ts_name = datetime.now().strftime("%Y%m%d_%H%M%S")
-        fname = f"fmkorea_popular_{ts_name}.json"
-        fpath = os.path.join(out_dir, fname)
-        
-        with open(fpath, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=2)
-
         print(f"\n{'='*60}")
         print(f"✅ 크롤링 완료!")
-        print(f"📁 저장 위치: {fpath}")
         print(f"📊 수집된 게시글 수: {len(payload)}개")
         print(f"{'='*60}\n")
         
@@ -111,6 +93,11 @@ async def main() -> None:
             if view_counts:
                 print(f"  - 조회수 범위: {min(view_counts)} ~ {max(view_counts)}")
             print(f"  - 롯데온 게시글: {sum(1 for p in payload if p.get('own_company') == 1)}개")
+        
+        # CSV에 바로 저장
+        if payload:
+            from src.utils.json_to_csv import append_posts_to_csv
+            append_posts_to_csv(payload)
 
 
 if __name__ == "__main__":
